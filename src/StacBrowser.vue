@@ -47,6 +47,8 @@ import { getBest, prepareSupported } from './locale-id';
 import BrowserStorage from "./browser-store";
 import Authentication from "./components/Authentication.vue";
 
+import VueGtag from 'vue-gtag'
+
 Vue.use(AlertPlugin);
 Vue.use(ButtonGroupPlugin);
 Vue.use(ButtonPlugin);
@@ -75,6 +77,12 @@ const router = new VueRouter({
     }
   }
 });
+
+Vue.use(VueGtag, {
+    config: {
+        id: 'G-SJ7Y1HXN04'
+    }
+}, router)
 
 // Setup store
 Vue.use(Vuex);
