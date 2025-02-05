@@ -20,3 +20,4 @@ jobs:
           exclude_assets: 'report.html'
           user_name: 'STAC Browser CI'
           user_email: matthias.mohr@radiant.earth
+          cname: opendata.wyvern.space
