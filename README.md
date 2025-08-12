@@ -8,7 +8,7 @@ implemented as a single page application (SPA) for ease of development and to
 limit the overall number of catalog reads necessary when browsing (as catalogs
 may be nested and do not necessarily contain references to their parents).
 
-Version: **3.3.3** (supports all STAC versions between 0.6.0 and 1.1.0)
+Version: **3.3.5** (supports all STAC versions between 0.6.0 and 1.1.0)
 
 This package has also been published to npm as [`@radiantearth/stac-browser`](https://www.npmjs.com/package/@radiantearth/stac-browser).
 
@@ -123,6 +123,7 @@ You need to change the [`locale`](docs/options.md#locale) and [`supportedLocales
 
 The following languages are currently supported:
 
+- Arabic `ar`
 - German `de` (Germany `de`, Switzerland `de-CH`)
 - Spanish `es`
 - English `en` (International `en`, US `en-US`, UK `en-GB`)
@@ -143,6 +144,7 @@ The following contributors kindly provide the translations:
 - [@m-mohr](https://github.com/m-mohr): `de`, `en`, `en-GB`, `en-US`
 - [@p1d1d1](https://github.com/p1d1d1): `de-CH`, `fr-CH`, `it`, `it-CH`
 - [@psacra](https://github.com/psacra): `pt`
+- [@randa-11295](https://github.com/randa-11295): `ar`
 - [@rnanclares](https://github.com/rnanclares): `es`
 - [@uba](https://github.com/uba): `pt-BR`
 
@@ -179,8 +181,8 @@ If you need even more flexibility, you need to dig into the Vue files and their 
 ### Basemaps
 
 The file `basemaps.config.js` contains the configuration for the basemaps.
-You can update either just the `BASEMAPS` object or you can write a custom function `configureBasemap` that returns the desired options for [vue2-leaflet](https://vue2-leaflet.netlify.app/).
-[XYZ](https://vue2-leaflet.netlify.app/components/LTileLayer.html#props) and [WMS](https://vue2-leaflet.netlify.app/components/LWMSTileLayer.html#props) basemaps are supported and have different options that you can set.
+You can update either just the `BASEMAPS` object or you can write a custom function `configureBasemap` that returns the desired options for OpenLayers.
+XYZ, WMTS, and WMS basemaps are supported and have different options that you can set.
 
 ### Actions
 

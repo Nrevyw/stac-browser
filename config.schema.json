@@ -90,6 +90,14 @@
       "noCLI": true,
       "noEnv": true
     },
+    "getMapSourceOptions": {
+      "type": [
+        "null"
+      ],
+      "format": "function",
+      "noCLI": true,
+      "noEnv": true
+    },
     "stacProxyUrl": {
       "type": [
         "array",
@@ -152,18 +160,18 @@
         "boolean"
       ]
     },
-    "geoTiffResolution": {
-      "type": [
-        "integer"
-      ],
-      "minimum": 1
-    },
     "redirectLegacyUrls": {
       "type": [
         "boolean"
       ]
     },
     "itemsPerPage": {
+      "type": [
+        "integer"
+      ],
+      "minimum": 1
+    },
+    "maxItemsPerPage": {
       "type": [
         "integer"
       ],
@@ -181,12 +189,6 @@
           "number"
         ]
       }
-    },
-    "maxPreviewsOnMap": {
-      "type": [
-        "integer"
-      ],
-      "minimum": 1
     },
     "crossOriginMedia": {
       "type": [
@@ -236,6 +238,11 @@
         {
           "$ref": "https://stac-extensions.github.io/authentication/v1.1.0/schema.json"
         }
+      ]
+    },
+    "crs": {
+      "type": [
+        "object"
       ]
     }
   }

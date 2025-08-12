@@ -21,14 +21,14 @@
 
         <b-form-group v-if="canFilterExtents" class="filter-datetime" :label="$t('search.temporalExtent')" :label-for="ids.datetime" :description="$t('search.dateDescription')">
           <date-picker
-            range :id="ids.datetime" :lang="datepickerLang" :format="datepickerFormat"
-            v-model="datetime" input-class="form-control mx-input"
+            range type="datetime" v-model="datetime" input-class="form-control mx-input"
+            :id="ids.datetime" :lang="datepickerLang" :format="dateTimeFormat"
           />
         </b-form-group>
 
         <b-form-group v-if="canFilterExtents" class="filter-bbox" :label="$t('search.spatialExtent')" :label-for="ids.bbox">
-          <b-form-checkbox :id="ids.bbox" v-model="provideBBox" value="1" @change="setBBox()">{{ $t('search.filterBySpatialExtent') }}</b-form-checkbox>
-          <Map class="mb-4" v-if="provideBBox" :stac="stac" selectBounds @bounds="setBBox" scrollWheelZoom />
+          <b-form-checkbox :id="ids.bbox" v-model="provideBBox" value="1">{{ $t('search.filterBySpatialExtent') }}</b-form-checkbox>
+          <MapSelect class="mb-4" v-if="provideBBox" v-model="query.bbox" :stac="stac" />
         </b-form-group>
 
         <b-form-group v-if="conformances.CollectionIdFilter" class="filter-collection" :label="$tc('stacCollection', collections.length)" :label-for="ids.collections">
@@ -128,12 +128,12 @@ import ApiCapabilitiesMixin, { TYPES } from './ApiCapabilitiesMixin';
 import DatePickerMixin from './DatePickerMixin';
 import Loading from './Loading.vue';
 
-import STAC from '../models/stac';
+import { CatalogLike, STAC } from 'stac-js';
+import { createSTAC } from '../models/stac'; 
 import Cql from '../models/cql2/cql';
 import Queryable from '../models/cql2/queryable';
 import CqlValue from '../models/cql2/value';
 import CqlLogicalOperator from '../models/cql2/operators/logical';
-import { CqlEqual } from '../models/cql2/operators/comparison';
 import { stacRequest } from '../store/utils';
 
 function getQueryDefaults() {
@@ -154,6 +154,8 @@ function getDefaults() {
     sortOrder: 1,
     sortTerm: null,
     provideBBox: false,
+    // Store previous bbox so that it survives when the map is temporarily hidden
+    bbox: null,
     query: getQueryDefaults(),
     filtersAndOr: 'and',
     filters: [],
@@ -176,7 +178,7 @@ export default {
     BFormRadioGroup,
     QueryableInput: () => import('./QueryableInput.vue'),
     Loading,
-    Map: () => import('./Map.vue'),
+    MapSelect: () => import('./maps/MapSelect.vue'),
     SortButtons: () => import('./SortButtons.vue'),
     Multiselect
   },
@@ -187,7 +189,7 @@ export default {
   props: {
     parent: {
       type: Object,
-      required: true
+      default: null
     },
     title: {
       type: String,
@@ -205,7 +207,6 @@ export default {
   data() {
     return Object.assign({
       results: null,
-      maxItems: 10000,
       loaded: false,
       queryables: null,
       hasAllCollections: false,
@@ -215,7 +216,7 @@ export default {
     }, getDefaults());
   },
   computed: {
-    ...mapState(['itemsPerPage', 'uiLanguage']),
+    ...mapState(['itemsPerPage', 'maxItemsPerPage', 'uiLanguage']),
     ...mapGetters(['canSearchCollections', 'supportsConformance']),
     collectionSelectOptions() {
       let taggable = !this.hasAllCollections;
@@ -240,7 +241,7 @@ export default {
       };
     },
     collectionSearchLink() {
-      return this.parent instanceof STAC && this.parent.getApiCollectionsLink();
+      return this.parent instanceof CatalogLike && this.parent.getApiCollectionsLink();
     },
     canSearchCollectionsFreeText() {
       return this.canSearchCollections && this.supportsConformance(TYPES.Collections.FreeText);
@@ -281,6 +282,9 @@ export default {
       const collator = new Intl.Collator(this.uiLanguage);
       return this.queryables.slice(0).sort((a, b) => collator.compare(a.title, b.title));
     },
+    maxItems() {
+      return this.maxItemsPerPage || 1000;
+    },
     datetime: {
       get() {
         return Array.isArray(this.query.datetime) ? this.query.datetime.map(d => Utils.dateFromUTC(d)) : null;
@@ -317,6 +321,24 @@ export default {
             return collection ? collection : this.collectionToMultiSelect({id});
           });
         }
+      }
+    },
+    query: {
+      deep: true,
+      handler(query) {
+        if (query?.bbox) {
+          // Store the previously selected bbox so that it can be restored after the
+          // map had been hidden accidentally.
+          this.bbox = query.bbox;
+        }
+      }
+    },
+    provideBBox(shown) {
+      if (!shown) {
+        this.query.bbox = null;
+      }
+      else {
+        this.query.bbox = this.bbox;
       }
     }
   },
@@ -405,9 +427,10 @@ export default {
           data.queryableLink = this.findQueryableLink(links) || null;
         }
 
+        // todo: use ItemCollection / CollectionCollection
         if (!hasMore && Array.isArray(response.data.collections)) {
           let collections = response.data.collections
-            .map(collection => new STAC(collection));
+            .map(collection => createSTAC(collection));
           data.collections = this.prepareCollections(collections);
         }
       }
@@ -488,9 +511,10 @@ export default {
       this.filters.splice(queryableIndex, 1);
     },
     additionalFieldSelected(queryable) {
+      const operators = queryable.getOperators(this.cql);
       this.filters.push({
         value: CqlValue.create(queryable.defaultValue),
-        operator: CqlEqual,
+        operator: operators[0],
         queryable
       });
     },
@@ -524,26 +548,6 @@ export default {
     },
     setSearchTerms(terms) {
       this.$set(this.query, 'q', terms);
-    },
-    setBBox(bounds) {
-      let bbox = null;
-      if (this.provideBBox) {
-        if (Utils.isObject(bounds) && typeof bounds.toBBoxString === 'function') {
-          // This is a Leaflet LatLngBounds Object
-          const Y = 85.06;
-          const X = 180;
-          bbox = [
-            Math.max(bounds.getWest(), -X),
-            Math.max(bounds.getSouth(), -Y),
-            Math.min(bounds.getEast(), X),
-            Math.min(bounds.getNorth(), Y)
-          ];
-        }
-        else if (Array.isArray(bounds) && bounds.length === 4) {
-          bbox = bounds;
-        }
-      }
-      this.$set(this.query, 'bbox', bbox);
     },
     addCollection(collection) {
       if (!this.collectionSelectOptions.taggable) {

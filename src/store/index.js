@@ -4,13 +4,13 @@ import Vuex from "vuex";
 import URI from "urijs";
 
 import i18n from '../i18n';
-import { stacBrowserSpecialHandling } from "../rels";
 import Utils, { BrowserError } from '../utils';
-import STAC from '../models/stac';
+import { addMissingChildren, getDisplayTitle, createSTAC } from '../models/stac';
+import { CatalogLike, STAC } from 'stac-js';
 
 import auth from './auth.js';
 import { addQueryIfNotExists, isAuthenticationError, Loading, processSTAC, proxyUrl, unproxyUrl, stacRequest } from './utils';
-import { getBest } from '../locale-id';
+import { getBest } from 'stac-js/src/locales';
 import I18N from '@radiantearth/stac-fields/I18N';
 import { translateFields, executeCustomFunctions, loadMessages } from '../i18n';
 import { TYPES } from "../components/ApiCapabilitiesMixin";
@@ -35,7 +35,8 @@ function getStore(config, router) {
 
     apiItems: [],
     apiItemsLink: null,
-    apiItemsPagination: {}
+    apiItemsPagination: {},
+    apiItemsNumberMatched: null,
   });
 
   const catalogDefaults = () => ({
@@ -99,7 +100,7 @@ function getStore(config, router) {
         }
       },
 
-      displayCatalogTitle: (state, getters) => STAC.getDisplayTitle(getters.root, state.catalogTitle),
+      displayCatalogTitle: (state, getters) => getDisplayTitle(getters.root, state.catalogTitle),
 
       isCollection: state => state.data?.isCollection() || false,
       isCatalog: state => state.data?.isCatalog() || false,
@@ -211,8 +212,8 @@ function getStore(config, router) {
         return [];
       },
       catalogs: state => {
-        let hasCollections = Boolean(state.data instanceof STAC && state.data.getApiCollectionsLink() && state.apiCollections.length > 0);
-        let hasChilds = Boolean(state.data instanceof STAC);
+        let hasCollections = Boolean(state.data instanceof CatalogLike && state.data.getApiCollectionsLink() && state.apiCollections.length > 0);
+        let hasChilds = Boolean(state.data instanceof CatalogLike);
         let showCollections = !state.apiCatalogPriority || state.apiCatalogPriority === 'collections';
         let showChilds = !state.apiCatalogPriority || state.apiCatalogPriority === 'childs';
         let catalogs = [];
@@ -220,34 +221,10 @@ function getStore(config, router) {
           catalogs = catalogs.concat(state.apiCollections);
         }
         if (hasChilds && showChilds) {
-          catalogs = STAC.addMissingChildren(catalogs, state.data);
+          catalogs = addMissingChildren(catalogs, state.data);
         }
         return catalogs;
       },
-
-      // hasAsset also checks whether the assets have a href and thus are not item asset definitions
-      hasAssets: (state, getters) => Boolean(Object.values(getters.assets).find(asset => Utils.isObject(asset) && typeof asset.href === 'string')),
-      assets: (state, getters) => {
-        if (!Utils.isObject(state.data?.assets)) {
-          return {};
-        }
-        else if (state.showThumbnailsAsAssets) {
-          return state.data.assets;
-        }
-        else {
-          let assets = {};
-          let thumbnails = getters.thumbnails;
-          for (let key in state.data.assets) {
-            let asset = state.data.assets[key];
-            if (!thumbnails.includes(asset)) {
-              assets[key] = asset;
-            }
-          }
-          return assets;
-        }
-      },
-      thumbnails: state => state.data ? state.data.getThumbnails(true) : [],
-      additionalLinks: state => state.data ? state.data.getLinksWithOtherRels(stacBrowserSpecialHandling).filter(link => link.rel !== 'preview' || !Utils.canBrowserDisplayImage(link)) : [],
 
       toBrowserPath: (state, getters) => url => {
         if (!Utils.hasText(url)) {
@@ -283,7 +260,7 @@ function getStore(config, router) {
         }
       },
       fromBrowserPath: (state, getters) => url => {
-        const externalRE = /^\/(search\/)?external\//;
+        const externalRE = /^\/((search|validation)\/)?external\//;
         if (!Utils.hasText(url) || url === '/') {
           url = state.catalogUrl;
         }
@@ -515,7 +492,7 @@ function getStore(config, router) {
           state.title = title;
         }
         else {
-          state.title = STAC.getDisplayTitle(state.data, state.catalogTitle);
+          state.title = getDisplayTitle(state.data, state.catalogTitle);
           if (state.data) {
             let description = state.data.getMetadata('description');
             if (Utils.hasText(description)) {
@@ -584,6 +561,14 @@ function getStore(config, router) {
           state.apiItemsPagination = pages;
         }
 
+        if (show) {
+          if (typeof data.numberMatched === 'number') {
+            state.apiItemsNumberMatched = data.numberMatched;
+          } else {
+            state.apiItemsNumberMatched = null;
+          }
+        }
+
         if (stac instanceof STAC) {
           // ToDo: Prev link only required when state.apiItems is not cached(?) -> cache apiItems?
           stac.setApiData(apiItems, pages.next, pages.prev);
@@ -603,6 +588,11 @@ function getStore(config, router) {
         if (stac instanceof STAC) {
           stac.setApiData(collections, nextLink);
         }
+      },
+      resetApiCollections(state) {
+        state.apiCollections = [];
+        state.apiItemsLoading = {};
+        state.nextCollectionsLink = null;
       },
       resetApiItems(state, link) {
         state.apiItems = [];
@@ -712,7 +702,14 @@ function getStore(config, router) {
         await cx.dispatch('auth/requestLogin');
       },
       async load(cx, args) {
-        let { url, show, force, noRetry, omitApi } = args;
+        let {
+          url, // URL to load
+          show, // Show the page when loading is finished, otherwise it's likely loaded in the background for completing specific parts of the page
+          force, // Force reloading the data, omit the cache
+          noRetry, // Don't retry on authentication errors
+          omitApi, // Don't load API collections or API items yet
+          isRoot // Is a request for the root catalog initiated by this function, avoiding endless loops in some mis-configured instances (see https://github.com/radiantearth/stac-browser/issues/580)
+        } = args;
 
         const path = cx.getters.toBrowserPath(url);
         url = Utils.toAbsolute(url, cx.state.url);
@@ -731,7 +728,7 @@ function getStore(config, router) {
           return;
         }
 
-        const hasData = data instanceof STAC && !data.isPotentiallyIncomplete();
+        const hasData = data instanceof STAC && !data._incomplete;
         if (!hasData) {
           cx.commit('loading', { url, loading });
           try {
@@ -739,7 +736,7 @@ function getStore(config, router) {
             if (!Utils.isObject(response.data)) {
               throw new BrowserError(i18n.t('errors.invalidJsonObject'));
             }
-            data = new STAC(response.data, url, path);
+            data = createSTAC(response.data, url, path);
             cx.commit('loaded', { url, data });
 
             if (show) {
@@ -774,8 +771,8 @@ function getStore(config, router) {
         }
 
         // Load API Collections
-        const apiCollectionLink = data.getApiCollectionsLink();
-        const apiItemLink = data.getApiItemsLink();
+        const apiCollectionLink = data instanceof CatalogLike && data.getApiCollectionsLink();
+        const apiItemLink = data instanceof CatalogLike && data.getApiItemsLink();
         if (!omitApi && apiCollectionLink) {
           let args = { stac: data, show: loading.show };
           try {
@@ -801,7 +798,7 @@ function getStore(config, router) {
         }
 
         // Load the root catalog data if not available (e.g. after page refresh or external access)
-        if (!cx.getters.root) {
+        if (!cx.getters.root && !isRoot) {
           let catalogUrl = cx.state.catalogUrl;
           if (!catalogUrl) {
             const root = data.getLinkWithRel('root');
@@ -811,7 +808,7 @@ function getStore(config, router) {
             }
           }
           if (catalogUrl) {
-            await cx.dispatch("load", { url: catalogUrl, omitApi: true });
+            await cx.dispatch("load", { url: catalogUrl, omitApi: true, isRoot: true });
           }
         }
 
@@ -831,6 +828,9 @@ function getStore(config, router) {
             link = stac.getApiItemsLink();
             baseUrl = stac.getAbsoluteUrl();
           }
+          if (baseUrl) {
+            baseUrl = new URI(baseUrl);
+          }
 
           link = Utils.addFiltersToLink(link, filters, cx.state.itemsPerPage);
 
@@ -844,21 +844,31 @@ function getStore(config, router) {
                 if (!Utils.isObject(item) || item.type !== 'Feature') {
                   return null;
                 }
+                // See https://github.com/radiantearth/stac-browser/issues/486
                 let selfLink = Utils.getLinkWithRel(item.links, 'self');
                 let url;
                 if (selfLink?.href) {
-                  url = Utils.toAbsolute(selfLink.href, baseUrl);
+                  url = Utils.toAbsolute(selfLink.href, baseUrl, false);
                 }
                 else if (typeof item.id !== 'undefined') {
-                  let apiCollectionsLink = cx.getters.root?.getApiCollectionsLink();
-                  if (baseUrl) {
-                    url = Utils.toAbsolute(`items/${item.id}`, baseUrl);
+                  let apiCollectionsLink = cx.getters.root?.getApiCollectionsLink()?.href;
+                  if (apiCollectionsLink) {
+                    apiCollectionsLink = new URI(apiCollectionsLink);
+                  }
+                  if (baseUrl && baseUrl.path().endsWith('/')) {
+                    url = Utils.toAbsolute(`items/${item.id}`, baseUrl, false);
+                  }
+                  else if (baseUrl) {
+                    url = Utils.toAbsolute(`${collectionId}/items/${item.id}`, baseUrl, false);
+                  }
+                  else if (apiCollectionsLink?.path().endsWith('/')) {
+                    url = Utils.toAbsolute(`${collectionId}/items/${item.id}`, apiCollectionsLink, false);
                   }
                   else if (apiCollectionsLink) {
-                    url = Utils.toAbsolute(`${collectionId}/items/${item.id}`, apiCollectionsLink.href);
+                    url = Utils.toAbsolute(`collections/${collectionId}/items/${item.id}`, apiCollectionsLink, false);
                   }
                   else if (cx.state.catalogUrl) {
-                    url = Utils.toAbsolute(`collections/${collectionId}/items/${item.id}`, cx.state.catalogUrl);
+                    url = Utils.toAbsolute(`collections/${collectionId}/items/${item.id}`, cx.state.catalogUrl, false);
                   }
                   else {
                     return null;
@@ -867,13 +877,14 @@ function getStore(config, router) {
                 else {
                   return null;
                 }
+                url = url.toString();
                 let data = cx.getters.getStac(url);
                 if (data) {
                   return data;
                 }
                 else {
-                  data = new STAC(item, url, cx.getters.toBrowserPath(url));
-                  data.markPotentiallyIncomplete();
+                  data = createSTAC(item, url, cx.getters.toBrowserPath(url));
+                  data._incomplete = true;
                   cx.commit('loaded', { data, url });
                   return data;
                 }
@@ -904,16 +915,14 @@ function getStore(config, router) {
       async loadNextApiCollections(cx, args) {
         let { stac, show, noRetry } = args;
         let link;
-        if (stac) {
-          // First page
-          if (cx.state.apiCollections.length > 0) {
-            // If we have already loaded collections, skip loading the first page
-            return;
-          }
+        if (stac) { // First page
+          // If we load from new collections, reset list of collections.
+          // Otherwise we may append to collections from a parent entity.
+          // https://github.com/radiantearth/stac-browser/issues/617
+          cx.commit('resetApiCollections');
           link = stac.getLinkWithRel('data');
         }
-        else {
-          // Second page and after
+        else { // Second page and after
           stac = cx.state.data;
           link = cx.state.nextCollectionsLink;
         }
@@ -930,18 +939,30 @@ function getStore(config, router) {
               let selfLink = Utils.getLinkWithRel(collection.links, 'self');
               let url;
               if (selfLink?.href) {
-                url = Utils.toAbsolute(selfLink.href, cx.state.url || stac.getAbsoluteUrl());
+                url = Utils.toAbsolute(selfLink.href, cx.state.url || stac.getAbsoluteUrl(), false);
               }
               else {
-                url = Utils.toAbsolute(`collections/${collection.id}`, cx.state.catalogUrl || stac.getAbsoluteUrl());
+                // see https://github.com/radiantearth/stac-browser/issues/486
+                let baseUrl = cx.state.catalogUrl || stac.getAbsoluteUrl();
+                if (baseUrl) {
+                  baseUrl = new URI(baseUrl);
+                  if (!baseUrl.path().endsWith('/')) {
+                    baseUrl.path(baseUrl.path() + '/');
+                  }
+                  url = Utils.toAbsolute(`collections/${collection.id}`, baseUrl, false);
+                }
               }
+              if (!url) {
+                return null; // We can't detect a URL, skip this flawed collection
+              }
+              url = url.toString();
               let data = cx.getters.getStac(url);
               if (data) {
                 return data;
               }
               else {
-                data = new STAC(collection, url, cx.getters.toBrowserPath(url));
-                data.markPotentiallyIncomplete();
+                data = createSTAC(collection, url, cx.getters.toBrowserPath(url));
+                data._incomplete = true;
                 cx.commit('loaded', { data, url });
                 return data;
               }
@@ -963,14 +984,6 @@ function getStore(config, router) {
         let response = await stacRequest(cx, link);
         if (Utils.isObject(response.data) && Array.isArray(response.data.conformsTo)) {
           cx.commit('setConformanceClasses', response.data.conformsTo);
-        }
-      },
-      async loadGeoJson(cx, link) {
-        try {
-          let response = await stacRequest(cx, link);
-          return response.data; // Use data with $refs included as fallback anyway
-        } catch (error) {
-          return null;
         }
       },
       async retryAfterAuth(cx) {
