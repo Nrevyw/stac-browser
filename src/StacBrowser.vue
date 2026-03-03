@@ -1,6 +1,6 @@
 <template>
   <b-container id="stac-browser">
-    <!-- Maintenance Modal -->
+    <!-- Maintenance Modal >
     <div class="maintenance-overlay">
       <div class="maintenance-modal">
         <div class="maintenance-icon">
@@ -19,7 +19,7 @@
           contact <a href="mailto:sales@wyvern.space">sales@wyvern.space</a>.
         </p>
       </div>
-    </div>
+    </div-->
     <!-- New Top Bar -->
     <div class="top-bar">
       <!-- Left Section -->
